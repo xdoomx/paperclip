@@ -24,6 +24,7 @@ import { dashboardRoutes } from "./routes/dashboard.js";
 import { sidebarBadgeRoutes } from "./routes/sidebar-badges.js";
 import { instanceSettingsRoutes } from "./routes/instance-settings.js";
 import { llmRoutes } from "./routes/llms.js";
+import { copilotGatewayRoutes } from "./routes/copilot-gateway.js";
 import { assetRoutes } from "./routes/assets.js";
 import { accessRoutes } from "./routes/access.js";
 import { pluginRoutes } from "./routes/plugins.js";
@@ -122,6 +123,7 @@ export async function createApp(
     app.all("/api/auth/*authPath", opts.betterAuthHandler);
   }
   app.use(llmRoutes(db));
+  app.use("/copilot-gateway", copilotGatewayRoutes());
 
   // Mount API routes
   const api = Router();

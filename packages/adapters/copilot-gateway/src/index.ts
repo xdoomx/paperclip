@@ -16,6 +16,12 @@ Don't use when:
 - You need a WebSocket-based gateway (use openclaw_gateway instead).
 - Your deployment does not permit outbound HTTP access from the Paperclip server.
 
+Built-in gateway:
+- Paperclip ships with a built-in Copilot-compatible gateway at /copilot-gateway on the Paperclip server.
+- Set url to http://<paperclip-host>:<port>/copilot-gateway to use the built-in gateway without running a separate service.
+- The built-in gateway requires OPENAI_API_KEY or ANTHROPIC_API_KEY (or llm config in paperclip.json) to process requests.
+- Secure the built-in gateway with the optional PAPERCLIP_COPILOT_GATEWAY_TOKEN environment variable.
+
 Core fields:
 - url (string, required): Gateway base URL (http:// or https://)
 - authToken (string, optional): Bearer token sent as Authorization header

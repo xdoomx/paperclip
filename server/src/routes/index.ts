@@ -11,5 +11,6 @@ export { activityRoutes } from "./activity.js";
 export { dashboardRoutes } from "./dashboard.js";
 export { sidebarBadgeRoutes } from "./sidebar-badges.js";
 export { llmRoutes } from "./llms.js";
+export { copilotGatewayRoutes } from "./copilot-gateway.js";
 export { accessRoutes } from "./access.js";
 export { instanceSettingsRoutes } from "./instance-settings.js";
