@@ -327,8 +327,8 @@ export function copilotGatewayRoutes() {
       return;
     }
 
-    const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : "gpt-4o";
-    const timeoutSec = typeof body.timeoutSec === "number" ? body.timeoutSec : 120;
+    const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : DEFAULT_COPILOT_MODEL;
+    const timeoutSec = typeof body.timeoutSec === "number" ? body.timeoutSec : DEFAULT_TIMEOUT_SEC;
     const timeoutMs = timeoutSec * 1000;
     const apiBase = resolveCopilotApiBase();
 
@@ -373,8 +373,8 @@ export function copilotGatewayRoutes() {
       return;
     }
 
-    const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : "gpt-4o";
-    const timeoutSec = typeof body.timeoutSec === "number" ? body.timeoutSec : 120;
+    const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : DEFAULT_COPILOT_MODEL;
+    const timeoutSec = typeof body.timeoutSec === "number" ? body.timeoutSec : DEFAULT_TIMEOUT_SEC;
     const timeoutMs = timeoutSec * 1000;
     const apiBase = resolveCopilotApiBase();
 
