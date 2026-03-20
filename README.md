@@ -206,6 +206,20 @@ OpenClaw connects to Paperclip over its WebSocket gateway protocol.
 
 <br/>
 
+## Connecting a Copilot Chat Gateway
+
+Any Copilot-compatible HTTP chat gateway can be registered as a Paperclip agent using the `copilot_gateway` adapter.
+
+1. Stand up a gateway that exposes `GET /health`, `GET /models`, and `POST /chat` (or `POST /chat/stream` for SSE)
+2. In Paperclip UI, create a new agent and choose **Copilot Gateway** as the adapter type
+3. Enter the gateway **URL** (`http://` or `https://`) and an optional **auth token**
+4. Paperclip will call `GET /models` on the URL to populate the available model list
+5. Assign a task to the agent — Paperclip posts the wake payload to `POST /chat` and streams the response
+
+> **Streaming:** Enable the `stream` option on the agent to use `POST /chat/stream` (SSE) instead of the standard JSON endpoint.
+
+<br/>
+
 ## FAQ
 
 **What does a typical setup look like?**
