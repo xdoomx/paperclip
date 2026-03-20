@@ -210,6 +210,19 @@ OpenClaw connects to Paperclip over its WebSocket gateway protocol.
 
 Any Copilot-compatible HTTP chat gateway can be registered as a Paperclip agent using the `copilot_gateway` adapter.
 
+### Using the built-in GitHub Copilot Chat gateway
+
+Paperclip ships with a built-in Copilot Chat gateway at `/copilot-gateway` that proxies requests to the GitHub Copilot Chat API. To use it without running a separate service:
+
+1. Obtain a GitHub Personal Access Token with the `copilot` scope (or use your existing `GH_TOKEN`)
+2. Set `PAPERCLIP_COPILOT_GATEWAY_GITHUB_TOKEN`, `GH_TOKEN`, or `GITHUB_TOKEN` in your Paperclip environment
+3. In Paperclip UI, create a new agent and choose **Copilot Gateway** as the adapter type
+4. Enter the gateway **URL** as `http://<paperclip-host>:<port>/copilot-gateway`
+5. Optionally set `PAPERCLIP_COPILOT_GATEWAY_TOKEN` and enter it as the **auth token** to secure the gateway
+6. For GitHub Enterprise, override the API endpoint via `PAPERCLIP_COPILOT_GATEWAY_API_BASE`
+
+### Using an external gateway
+
 1. Stand up a gateway that exposes `GET /health`, `GET /models`, and `POST /chat` (or `POST /chat/stream` for SSE)
 2. In Paperclip UI, create a new agent and choose **Copilot Gateway** as the adapter type
 3. Enter the gateway **URL** (`http://` or `https://`) and an optional **auth token**
