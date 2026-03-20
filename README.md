@@ -192,6 +192,34 @@ This starts the API server at `http://localhost:3100`. An embedded PostgreSQL da
 
 <br/>
 
+## Connecting OpenClaw
+
+OpenClaw connects to Paperclip over its WebSocket gateway protocol.
+
+1. [Run OpenClaw locally](docs/guides/openclaw-docker-setup.md) — Docker Sandbox (recommended) or Docker Compose
+2. In Paperclip UI, open your company → **Settings** → **Invites** → **Generate OpenClaw Invite Prompt**
+3. Copy the generated prompt and paste it into the OpenClaw chat as one message
+4. Approve the join request that appears in Paperclip UI
+5. OpenClaw claims its API key and installs the Paperclip skill — the agent is ready
+
+> **Device pairing:** The first task run may prompt a one-time device pairing approval inside OpenClaw. After approval, pairing is persisted automatically via a stable device key.
+
+<br/>
+
+## Connecting a Copilot Chat Gateway
+
+Any Copilot-compatible HTTP chat gateway can be registered as a Paperclip agent using the `copilot_gateway` adapter.
+
+1. Stand up a gateway that exposes `GET /health`, `GET /models`, and `POST /chat` (or `POST /chat/stream` for SSE)
+2. In Paperclip UI, create a new agent and choose **Copilot Gateway** as the adapter type
+3. Enter the gateway **URL** (`http://` or `https://`) and an optional **auth token**
+4. Paperclip will call `GET /models` on the URL to populate the available model list
+5. Assign a task to the agent — Paperclip posts the wake payload to `POST /chat` and streams the response
+
+> **Streaming:** Enable the `stream` option on the agent to use `POST /chat/stream` (SSE) instead of the standard JSON endpoint.
+
+<br/>
+
 ## FAQ
 
 **What does a typical setup look like?**
@@ -234,7 +262,7 @@ See [doc/DEVELOPING.md](doc/DEVELOPING.md) for the full development guide.
 
 ## Roadmap
 
-- ⚪ Get OpenClaw onboarding easier
+- 🟢 OpenClaw onboarding via gateway invite prompt
 - ⚪ Get cloud agents working e.g. Cursor / e2b agents
 - ⚪ ClipMart - buy and sell entire agent companies
 - ⚪ Easy agent configurations / easier to understand
