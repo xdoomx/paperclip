@@ -1,11 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express from "express";
 import request from "supertest";
-import { copilotGatewayRoutes } from "../routes/copilot-gateway.js";
-
-vi.mock("../config-file.js", () => ({
-  readConfigFile: vi.fn().mockReturnValue(null),
-}));
+import { copilotGatewayRoutes, resetCopilotTokenCacheForTests } from "../routes/copilot-gateway.js";
 
 function createApp() {
   const app = express();
@@ -13,6 +9,39 @@ function createApp() {
   app.use("/copilot-gateway", copilotGatewayRoutes());
   return app;
 }
+
+function mockExchangeSuccess(fetchSpy: ReturnType<typeof vi.spyOn>) {
+  fetchSpy.mockResolvedValueOnce({
+    ok: true,
+    json: async () => ({
+      token: "copilot-token-abc",
+      expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+    }),
+  } as Response);
+}
+
+function mockExchangeFailure(fetchSpy: ReturnType<typeof vi.spyOn>) {
+  fetchSpy.mockResolvedValueOnce({ ok: false } as Response);
+}
+
+beforeEach(() => {
+  resetCopilotTokenCacheForTests();
+  delete process.env.PAPERCLIP_COPILOT_GATEWAY_GITHUB_TOKEN;
+  delete process.env.GH_TOKEN;
+  delete process.env.GITHUB_TOKEN;
+  delete process.env.PAPERCLIP_COPILOT_GATEWAY_TOKEN;
+  delete process.env.PAPERCLIP_COPILOT_GATEWAY_API_BASE;
+});
+
+afterEach(() => {
+  resetCopilotTokenCacheForTests();
+  delete process.env.PAPERCLIP_COPILOT_GATEWAY_GITHUB_TOKEN;
+  delete process.env.GH_TOKEN;
+  delete process.env.GITHUB_TOKEN;
+  delete process.env.PAPERCLIP_COPILOT_GATEWAY_TOKEN;
+  delete process.env.PAPERCLIP_COPILOT_GATEWAY_API_BASE;
+  vi.restoreAllMocks();
+});
 
 describe("GET /copilot-gateway/health", () => {
   it("returns 200 with status ok", async () => {
@@ -24,28 +53,15 @@ describe("GET /copilot-gateway/health", () => {
 });
 
 describe("GET /copilot-gateway/models", () => {
-  beforeEach(() => {
-    delete process.env.OPENAI_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
-    delete process.env.PAPERCLIP_COPILOT_GATEWAY_TOKEN;
-  });
-
-  afterEach(() => {
-    delete process.env.OPENAI_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
-    delete process.env.PAPERCLIP_COPILOT_GATEWAY_TOKEN;
-    vi.restoreAllMocks();
-  });
-
-  it("returns empty array when no LLM is configured", async () => {
+  it("returns empty array when no GitHub token is configured", async () => {
     const app = createApp();
     const res = await request(app).get("/copilot-gateway/models");
     expect(res.status).toBe(200);
     expect(res.body).toEqual([]);
   });
 
-  it("returns openai models when OPENAI_API_KEY is set", async () => {
-    process.env.OPENAI_API_KEY = "sk-test";
+  it("returns Copilot models when PAPERCLIP_COPILOT_GATEWAY_GITHUB_TOKEN is set", async () => {
+    process.env.PAPERCLIP_COPILOT_GATEWAY_GITHUB_TOKEN = "ghp_test";
     const app = createApp();
     const res = await request(app).get("/copilot-gateway/models");
     expect(res.status).toBe(200);
@@ -56,18 +72,25 @@ describe("GET /copilot-gateway/models", () => {
     expect(res.body.some((m: { id: string }) => m.id === "gpt-4o")).toBe(true);
   });
 
-  it("returns claude models when ANTHROPIC_API_KEY is set", async () => {
-    process.env.ANTHROPIC_API_KEY = "sk-ant-test";
+  it("returns Copilot models when GH_TOKEN is set", async () => {
+    process.env.GH_TOKEN = "ghp_test";
     const app = createApp();
     const res = await request(app).get("/copilot-gateway/models");
     expect(res.status).toBe(200);
-    expect(Array.isArray(res.body)).toBe(true);
-    expect(res.body.some((m: { id: string }) => m.id.startsWith("claude-"))).toBe(true);
+    expect(res.body.some((m: { id: string }) => m.id === "gpt-4o")).toBe(true);
+  });
+
+  it("returns Copilot models when GITHUB_TOKEN is set", async () => {
+    process.env.GITHUB_TOKEN = "ghp_test";
+    const app = createApp();
+    const res = await request(app).get("/copilot-gateway/models");
+    expect(res.status).toBe(200);
+    expect(res.body.some((m: { id: string }) => m.id === "gpt-4o")).toBe(true);
   });
 
   it("requires auth when PAPERCLIP_COPILOT_GATEWAY_TOKEN is set", async () => {
-    process.env.OPENAI_API_KEY = "sk-test";
-    process.env.PAPERCLIP_COPILOT_GATEWAY_TOKEN = "secret-token";
+    process.env.PAPERCLIP_COPILOT_GATEWAY_GITHUB_TOKEN = "ghp_test";
+    process.env.PAPERCLIP_COPILOT_GATEWAY_TOKEN = "gateway-secret";
     const app = createApp();
 
     const unauthRes = await request(app).get("/copilot-gateway/models");
@@ -75,36 +98,23 @@ describe("GET /copilot-gateway/models", () => {
 
     const authRes = await request(app)
       .get("/copilot-gateway/models")
-      .set("Authorization", "Bearer secret-token");
+      .set("Authorization", "Bearer gateway-secret");
     expect(authRes.status).toBe(200);
   });
 });
 
 describe("POST /copilot-gateway/chat", () => {
-  beforeEach(() => {
-    delete process.env.OPENAI_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
-    delete process.env.PAPERCLIP_COPILOT_GATEWAY_TOKEN;
-  });
-
-  afterEach(() => {
-    delete process.env.OPENAI_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
-    delete process.env.PAPERCLIP_COPILOT_GATEWAY_TOKEN;
-    vi.restoreAllMocks();
-  });
-
-  it("returns 503 when no LLM is configured", async () => {
+  it("returns 503 when no GitHub token is configured", async () => {
     const app = createApp();
     const res = await request(app)
       .post("/copilot-gateway/chat")
       .send({ messages: [{ role: "user", content: "Hello" }] });
     expect(res.status).toBe(503);
-    expect(res.body.error).toContain("No LLM provider configured");
+    expect(res.body.error).toContain("No GitHub token configured");
   });
 
   it("returns 400 when messages is empty", async () => {
-    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.PAPERCLIP_COPILOT_GATEWAY_GITHUB_TOKEN = "ghp_test";
     const app = createApp();
     const res = await request(app)
       .post("/copilot-gateway/chat")
@@ -114,7 +124,7 @@ describe("POST /copilot-gateway/chat", () => {
   });
 
   it("returns 400 when messages is missing", async () => {
-    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.PAPERCLIP_COPILOT_GATEWAY_GITHUB_TOKEN = "ghp_test";
     const app = createApp();
     const res = await request(app)
       .post("/copilot-gateway/chat")
@@ -122,13 +132,15 @@ describe("POST /copilot-gateway/chat", () => {
     expect(res.status).toBe(400);
   });
 
-  it("calls OpenAI and returns copilot protocol response", async () => {
-    process.env.OPENAI_API_KEY = "sk-test";
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+  it("exchanges GitHub token then calls Copilot Chat API and returns copilot protocol response", async () => {
+    process.env.PAPERCLIP_COPILOT_GATEWAY_GITHUB_TOKEN = "ghp_test";
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    mockExchangeSuccess(fetchSpy);
+    fetchSpy.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
         model: "gpt-4o",
-        choices: [{ message: { content: "Hello from OpenAI" } }],
+        choices: [{ message: { content: "Hello from Copilot" } }],
         usage: { prompt_tokens: 10, completion_tokens: 5 },
       }),
     } as Response);
@@ -139,21 +151,32 @@ describe("POST /copilot-gateway/chat", () => {
       .send({ messages: [{ role: "user", content: "Hello" }] });
 
     expect(res.status).toBe(200);
-    expect(res.body.summary).toBe("Hello from OpenAI");
-    expect(res.body.provider).toBe("openai");
+    expect(res.body.summary).toBe("Hello from Copilot");
+    expect(res.body.provider).toBe("copilot");
     expect(res.body.model).toBe("gpt-4o");
     expect(res.body.usage).toEqual({ inputTokens: 10, outputTokens: 5 });
-    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+    // Verify the chat call included Copilot-specific headers
+    const chatCall = fetchSpy.mock.calls[1];
+    const chatUrl = chatCall[0] as string;
+    expect(chatUrl).toContain("githubcopilot.com");
+    const chatInit = chatCall[1] as RequestInit;
+    const headers = chatInit.headers as Record<string, string>;
+    expect(headers["copilot-integration-id"]).toBe("copilot-chat");
+    expect(headers["editor-version"]).toBe("paperclip/1.0");
   });
 
-  it("calls Claude and returns copilot protocol response", async () => {
-    process.env.ANTHROPIC_API_KEY = "sk-ant-test";
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+  it("falls back to using GitHub token directly when token exchange fails", async () => {
+    process.env.PAPERCLIP_COPILOT_GATEWAY_GITHUB_TOKEN = "ghp_direct";
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    mockExchangeFailure(fetchSpy);
+    fetchSpy.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
-        model: "claude-opus-4-5",
-        content: [{ type: "text", text: "Hello from Claude" }],
-        usage: { input_tokens: 10, output_tokens: 5 },
+        model: "gpt-4o",
+        choices: [{ message: { content: "ok" } }],
+        usage: { prompt_tokens: 5, completion_tokens: 2 },
       }),
     } as Response);
 
@@ -163,33 +186,25 @@ describe("POST /copilot-gateway/chat", () => {
       .send({ messages: [{ role: "user", content: "Hello" }] });
 
     expect(res.status).toBe(200);
-    expect(res.body.summary).toBe("Hello from Claude");
-    expect(res.body.provider).toBe("claude");
-    expect(res.body.model).toBe("claude-opus-4-5");
-    expect(res.body.usage).toEqual({ inputTokens: 10, outputTokens: 5 });
-    expect(fetchSpy).toHaveBeenCalledOnce();
-  });
-
-  it("requires auth when PAPERCLIP_COPILOT_GATEWAY_TOKEN is set", async () => {
-    process.env.OPENAI_API_KEY = "sk-test";
-    process.env.PAPERCLIP_COPILOT_GATEWAY_TOKEN = "secret-token";
-    const app = createApp();
-
-    const unauthRes = await request(app)
-      .post("/copilot-gateway/chat")
-      .send({ messages: [{ role: "user", content: "Hello" }] });
-    expect(unauthRes.status).toBe(401);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    // When exchange fails, should use the original GitHub token
+    const chatCall = fetchSpy.mock.calls[1];
+    const chatInit = chatCall[1] as RequestInit;
+    const headers = chatInit.headers as Record<string, string>;
+    expect(headers.authorization).toBe("Bearer ghp_direct");
   });
 
   it("uses the model specified in the request body", async () => {
-    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.PAPERCLIP_COPILOT_GATEWAY_GITHUB_TOKEN = "ghp_test";
     let capturedBody: Record<string, unknown> | null = null;
-    vi.spyOn(globalThis, "fetch").mockImplementationOnce(async (_url, init) => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    mockExchangeFailure(fetchSpy);
+    fetchSpy.mockImplementationOnce(async (_url, init) => {
       capturedBody = JSON.parse(init?.body as string) as Record<string, unknown>;
       return {
         ok: true,
         json: async () => ({
-          model: "gpt-4-turbo",
+          model: "claude-3.5-sonnet",
           choices: [{ message: { content: "Response" } }],
           usage: { prompt_tokens: 5, completion_tokens: 3 },
         }),
@@ -199,14 +214,54 @@ describe("POST /copilot-gateway/chat", () => {
     const app = createApp();
     await request(app)
       .post("/copilot-gateway/chat")
-      .send({ messages: [{ role: "user", content: "Hello" }], model: "gpt-4-turbo" });
+      .send({ messages: [{ role: "user", content: "Hello" }], model: "claude-3.5-sonnet" });
 
-    expect(capturedBody?.model).toBe("gpt-4-turbo");
+    expect(capturedBody?.model).toBe("claude-3.5-sonnet");
   });
 
-  it("passes the copilot request context fields through", async () => {
-    process.env.OPENAI_API_KEY = "sk-test";
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+  it("requires auth when PAPERCLIP_COPILOT_GATEWAY_TOKEN is set", async () => {
+    process.env.PAPERCLIP_COPILOT_GATEWAY_GITHUB_TOKEN = "ghp_test";
+    process.env.PAPERCLIP_COPILOT_GATEWAY_TOKEN = "gateway-secret";
+    const app = createApp();
+
+    const unauthRes = await request(app)
+      .post("/copilot-gateway/chat")
+      .send({ messages: [{ role: "user", content: "Hello" }] });
+    expect(unauthRes.status).toBe(401);
+  });
+
+  it("uses a custom API base when PAPERCLIP_COPILOT_GATEWAY_API_BASE is set", async () => {
+    process.env.PAPERCLIP_COPILOT_GATEWAY_GITHUB_TOKEN = "ghp_test";
+    process.env.PAPERCLIP_COPILOT_GATEWAY_API_BASE = "https://custom.copilot.example.com";
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    mockExchangeFailure(fetchSpy);
+    let capturedUrl = "";
+    fetchSpy.mockImplementationOnce(async (url) => {
+      capturedUrl = url as string;
+      return {
+        ok: true,
+        json: async () => ({
+          model: "gpt-4o",
+          choices: [{ message: { content: "ok" } }],
+          usage: { prompt_tokens: 5, completion_tokens: 2 },
+        }),
+      } as Response;
+    });
+
+    const app = createApp();
+    await request(app)
+      .post("/copilot-gateway/chat")
+      .send({ messages: [{ role: "user", content: "Hello" }] });
+
+    expect(capturedUrl).toBe("https://custom.copilot.example.com/chat/completions");
+  });
+
+  it("passes the copilot request context fields transparently", async () => {
+    process.env.PAPERCLIP_COPILOT_GATEWAY_GITHUB_TOKEN = "ghp_test";
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    mockExchangeFailure(fetchSpy);
+    fetchSpy.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
         model: "gpt-4o",
@@ -228,20 +283,7 @@ describe("POST /copilot-gateway/chat", () => {
 });
 
 describe("POST /copilot-gateway/chat/stream", () => {
-  beforeEach(() => {
-    delete process.env.OPENAI_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
-    delete process.env.PAPERCLIP_COPILOT_GATEWAY_TOKEN;
-  });
-
-  afterEach(() => {
-    delete process.env.OPENAI_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
-    delete process.env.PAPERCLIP_COPILOT_GATEWAY_TOKEN;
-    vi.restoreAllMocks();
-  });
-
-  it("returns SSE error event when no LLM is configured", async () => {
+  it("returns SSE error event when no GitHub token is configured", async () => {
     const app = createApp();
     const res = await request(app)
       .post("/copilot-gateway/chat/stream")
@@ -254,7 +296,7 @@ describe("POST /copilot-gateway/chat/stream", () => {
   });
 
   it("returns SSE error event when messages is empty", async () => {
-    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.PAPERCLIP_COPILOT_GATEWAY_GITHUB_TOKEN = "ghp_test";
     const app = createApp();
     const res = await request(app)
       .post("/copilot-gateway/chat/stream")
@@ -265,8 +307,8 @@ describe("POST /copilot-gateway/chat/stream", () => {
   });
 
   it("requires auth when PAPERCLIP_COPILOT_GATEWAY_TOKEN is set", async () => {
-    process.env.OPENAI_API_KEY = "sk-test";
-    process.env.PAPERCLIP_COPILOT_GATEWAY_TOKEN = "secret-token";
+    process.env.PAPERCLIP_COPILOT_GATEWAY_GITHUB_TOKEN = "ghp_test";
+    process.env.PAPERCLIP_COPILOT_GATEWAY_TOKEN = "gateway-secret";
     const app = createApp();
 
     const unauthRes = await request(app)
@@ -275,8 +317,8 @@ describe("POST /copilot-gateway/chat/stream", () => {
     expect(unauthRes.status).toBe(401);
   });
 
-  it("streams OpenAI SSE and maps to copilot protocol", async () => {
-    process.env.OPENAI_API_KEY = "sk-test";
+  it("streams Copilot Chat SSE and maps to copilot protocol", async () => {
+    process.env.PAPERCLIP_COPILOT_GATEWAY_GITHUB_TOKEN = "ghp_test";
 
     const sseLines = [
       'data: {"choices":[{"delta":{"content":"Hello"}}]}',
@@ -289,7 +331,9 @@ describe("POST /copilot-gateway/chat/stream", () => {
     const encoded = encoder.encode(sseLines);
     let offset = 0;
 
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    mockExchangeFailure(fetchSpy);
+    fetchSpy.mockResolvedValueOnce({
       ok: true,
       body: {
         getReader: () => ({
@@ -316,7 +360,7 @@ describe("POST /copilot-gateway/chat/stream", () => {
     expect(res.headers["content-type"]).toMatch(/text\/event-stream/);
     expect(res.text).toContain('"type":"delta"');
     expect(res.text).toContain('"type":"result"');
-    expect(res.text).toContain('"provider":"openai"');
+    expect(res.text).toContain('"provider":"copilot"');
     expect(res.text).toContain("data: [DONE]");
   });
 });

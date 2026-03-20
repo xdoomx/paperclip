@@ -1,48 +1,118 @@
 import { Router, type Request, type Response } from "express";
-import { readConfigFile } from "../config-file.js";
 
-type LlmProvider = "openai" | "claude";
+const COPILOT_CHAT_API_BASE = "https://api.individual.githubcopilot.com";
+const COPILOT_TOKEN_EXCHANGE_URL = "https://api.github.com/copilot_internal/v2/token";
+const COPILOT_EDITOR_VERSION = "paperclip/1.0";
+const COPILOT_EDITOR_PLUGIN_VERSION = "paperclip-copilot-gateway/1.0";
+const TOKEN_EXCHANGE_TIMEOUT_MS = 5_000;
+const TOKEN_CACHE_REFRESH_BUFFER_MS = 60_000;
+const DEFAULT_COPILOT_TOKEN_TTL_MS = 25 * 60 * 1000;
+const ERROR_MESSAGE_MAX_LENGTH = 200;
+const DEFAULT_COPILOT_MODEL = "gpt-4o";
+const DEFAULT_TIMEOUT_SEC = 120;
 
-type GatewayLlmConfig = {
-  provider: LlmProvider;
-  apiKey: string;
-};
-
-const OPENAI_MODELS_FALLBACK: { id: string; label: string }[] = [
+// Models supported by GitHub Copilot Chat. Update as GitHub adds or removes models.
+const COPILOT_MODELS: { id: string; label: string }[] = [
   { id: "gpt-4o", label: "GPT-4o" },
   { id: "gpt-4o-mini", label: "GPT-4o Mini" },
-  { id: "gpt-4-turbo", label: "GPT-4 Turbo" },
-  { id: "gpt-3.5-turbo", label: "GPT-3.5 Turbo" },
+  { id: "o1-preview", label: "o1 Preview" },
+  { id: "o1-mini", label: "o1 Mini" },
+  { id: "claude-3.5-sonnet", label: "Claude 3.5 Sonnet" },
 ];
 
-const CLAUDE_MODELS_FALLBACK: { id: string; label: string }[] = [
-  { id: "claude-opus-4-5", label: "Claude Opus 4.5" },
-  { id: "claude-sonnet-4-5", label: "Claude Sonnet 4.5" },
-  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5" },
-  { id: "claude-3-5-sonnet-20241022", label: "Claude 3.5 Sonnet" },
-];
+type CopilotTokenCache = {
+  token: string;
+  expiresAt: number;
+};
 
-function resolveLlmConfig(): GatewayLlmConfig | null {
-  const openaiEnv = process.env.OPENAI_API_KEY?.trim();
-  if (openaiEnv) return { provider: "openai", apiKey: openaiEnv };
+let tokenCache: CopilotTokenCache | null = null;
 
-  const anthropicEnv = process.env.ANTHROPIC_API_KEY?.trim();
-  if (anthropicEnv) return { provider: "claude", apiKey: anthropicEnv };
+function createRateLimiter(maxRequests: number, windowMs: number) {
+  const requests = new Map<string, number[]>();
+  return {
+    check(key: string): boolean {
+      const now = Date.now();
+      const windowStart = now - windowMs;
+      const recent = (requests.get(key) ?? []).filter((ts) => ts > windowStart);
+      if (recent.length >= maxRequests) return false;
+      recent.push(now);
+      requests.set(key, recent);
+      return true;
+    },
+  };
+}
 
-  const fileConfig = readConfigFile();
-  if (fileConfig?.llm) {
-    const { provider, apiKey } = fileConfig.llm;
-    const trimmedKey = apiKey?.trim();
-    if (trimmedKey) {
-      return { provider: provider as LlmProvider, apiKey: trimmedKey };
-    }
-  }
+// Rate limit: 60 requests per minute per IP for auth-protected routes
+const gatewayRateLimiter = createRateLimiter(60, 60_000);
 
-  return null;
+function resolveGitHubToken(): string | null {
+  return (
+    process.env.PAPERCLIP_COPILOT_GATEWAY_GITHUB_TOKEN?.trim() ||
+    process.env.GH_TOKEN?.trim() ||
+    process.env.GITHUB_TOKEN?.trim() ||
+    null
+  );
 }
 
 function resolveGatewayAuthToken(): string | null {
   return process.env.PAPERCLIP_COPILOT_GATEWAY_TOKEN?.trim() || null;
+}
+
+function resolveCopilotApiBase(): string {
+  return (
+    process.env.PAPERCLIP_COPILOT_GATEWAY_API_BASE?.trim().replace(/\/$/, "") ||
+    COPILOT_CHAT_API_BASE
+  );
+}
+
+async function exchangeGitHubTokenForCopilotToken(githubToken: string): Promise<string | null> {
+  const now = Date.now();
+  if (tokenCache && tokenCache.expiresAt > now + TOKEN_CACHE_REFRESH_BUFFER_MS) {
+    return tokenCache.token;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TOKEN_EXCHANGE_TIMEOUT_MS);
+  try {
+    const response = await fetch(COPILOT_TOKEN_EXCHANGE_URL, {
+      method: "GET",
+      headers: {
+        authorization: `token ${githubToken}`,
+        "user-agent": COPILOT_EDITOR_PLUGIN_VERSION,
+        accept: "application/json",
+      },
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    const data = (await response.json()) as { token?: string; expires_at?: string };
+    const token = data.token?.trim();
+    if (!token) return null;
+    const expiresAt = data.expires_at ? new Date(data.expires_at).getTime() : now + DEFAULT_COPILOT_TOKEN_TTL_MS;
+    tokenCache = { token, expiresAt };
+    return token;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function resolveCopilotBearerToken(githubToken: string): Promise<string> {
+  const exchanged = await exchangeGitHubTokenForCopilotToken(githubToken);
+  return exchanged ?? githubToken;
+}
+
+export function resetCopilotTokenCacheForTests(): void {
+  tokenCache = null;
+}
+
+function checkRateLimit(req: Request, res: Response): boolean {
+  const ip = req.ip ?? req.socket.remoteAddress ?? "unknown";
+  if (!gatewayRateLimiter.check(ip)) {
+    res.status(429).json({ error: "Too many requests" });
+    return false;
+  }
+  return true;
 }
 
 function checkAuth(req: Request, res: Response, requiredToken: string): boolean {
@@ -57,27 +127,51 @@ function checkAuth(req: Request, res: Response, requiredToken: string): boolean 
 
 type ChatMessage = { role: string; content: string };
 
-async function callOpenAiChat(input: {
-  apiKey: string;
+function normalizeMessages(raw: unknown): ChatMessage[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ChatMessage[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const rec = item as Record<string, unknown>;
+    const role = typeof rec.role === "string" ? rec.role.trim() : "";
+    const content = typeof rec.content === "string" ? rec.content : "";
+    if (role && content) out.push({ role, content });
+  }
+  return out;
+}
+
+function buildCopilotHeaders(bearerToken: string, extra?: Record<string, string>): Record<string, string> {
+  return {
+    authorization: `Bearer ${bearerToken}`,
+    "content-type": "application/json",
+    "editor-version": COPILOT_EDITOR_VERSION,
+    "editor-plugin-version": COPILOT_EDITOR_PLUGIN_VERSION,
+    "copilot-integration-id": "copilot-chat",
+    "user-agent": COPILOT_EDITOR_PLUGIN_VERSION,
+    ...extra,
+  };
+}
+
+async function callCopilotChat(input: {
+  bearerToken: string;
+  apiBase: string;
   model: string;
   messages: ChatMessage[];
   timeoutMs: number;
 }): Promise<{ summary: string; model: string; inputTokens: number; outputTokens: number }> {
+  const { bearerToken, apiBase, model, messages, timeoutMs } = input;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), input.timeoutMs);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    const response = await fetch(`${apiBase}/chat/completions`, {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${input.apiKey}`,
-      },
-      body: JSON.stringify({ model: input.model, messages: input.messages }),
+      headers: buildCopilotHeaders(bearerToken, { accept: "application/json" }),
+      body: JSON.stringify({ model, messages }),
       signal: controller.signal,
     });
     if (!response.ok) {
       const text = await response.text().catch(() => "");
-      throw new Error(`OpenAI API error ${response.status}: ${text.slice(0, 200)}`);
+      throw new Error(`Copilot Chat API error ${response.status}: ${text.slice(0, ERROR_MESSAGE_MAX_LENGTH)}`);
     }
     const data = (await response.json()) as {
       model?: string;
@@ -88,7 +182,7 @@ async function callOpenAiChat(input: {
     const usage = data.usage ?? {};
     return {
       summary,
-      model: data.model ?? input.model,
+      model: data.model ?? model,
       inputTokens: usage.prompt_tokens ?? 0,
       outputTokens: usage.completion_tokens ?? 0,
     };
@@ -97,55 +191,15 @@ async function callOpenAiChat(input: {
   }
 }
 
-async function callClaudeChat(input: {
-  apiKey: string;
-  model: string;
-  messages: ChatMessage[];
-  timeoutMs: number;
-}): Promise<{ summary: string; model: string; inputTokens: number; outputTokens: number }> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), input.timeoutMs);
-  try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": input.apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({ model: input.model, messages: input.messages, max_tokens: 8192 }),
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`Anthropic API error ${response.status}: ${text.slice(0, 200)}`);
-    }
-    const data = (await response.json()) as {
-      model?: string;
-      content?: { type?: string; text?: string }[];
-      usage?: { input_tokens?: number; output_tokens?: number };
-    };
-    const summary = data.content?.find((b) => b.type === "text")?.text ?? "";
-    const usage = data.usage ?? {};
-    return {
-      summary,
-      model: data.model ?? input.model,
-      inputTokens: usage.input_tokens ?? 0,
-      outputTokens: usage.output_tokens ?? 0,
-    };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function streamOpenAiChat(input: {
-  apiKey: string;
+async function streamCopilotChat(input: {
+  bearerToken: string;
+  apiBase: string;
   model: string;
   messages: ChatMessage[];
   timeoutMs: number;
   res: Response;
 }): Promise<void> {
-  const { apiKey, model, messages, timeoutMs, res } = input;
+  const { bearerToken, apiBase, model, messages, timeoutMs, res } = input;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let summary = "";
@@ -154,27 +208,23 @@ async function streamOpenAiChat(input: {
   let outputTokens = 0;
 
   try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    const response = await fetch(`${apiBase}/chat/completions`, {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${apiKey}`,
-        accept: "text/event-stream",
-      },
+      headers: buildCopilotHeaders(bearerToken, { accept: "text/event-stream" }),
       body: JSON.stringify({ model, messages, stream: true, stream_options: { include_usage: true } }),
       signal: controller.signal,
     });
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
-      res.write(`data: ${JSON.stringify({ type: "error", message: `OpenAI API error ${response.status}: ${text.slice(0, 200)}` })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: "error", message: `Copilot Chat API error ${response.status}: ${text.slice(0, ERROR_MESSAGE_MAX_LENGTH)}` })}\n\n`);
       res.write("data: [DONE]\n\n");
       res.end();
       return;
     }
 
     if (!response.body) {
-      res.write(`data: ${JSON.stringify({ type: "error", message: "OpenAI returned no body" })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: "error", message: "Copilot Chat API returned no body" })}\n\n`);
       res.write("data: [DONE]\n\n");
       res.end();
       return;
@@ -228,130 +278,13 @@ async function streamOpenAiChat(input: {
     `data: ${JSON.stringify({
       type: "result",
       summary,
-      provider: "openai",
+      provider: "copilot",
       model: responseModel,
       usage: { inputTokens, outputTokens },
     })}\n\n`,
   );
   res.write("data: [DONE]\n\n");
   res.end();
-}
-
-async function streamClaudeChat(input: {
-  apiKey: string;
-  model: string;
-  messages: ChatMessage[];
-  timeoutMs: number;
-  res: Response;
-}): Promise<void> {
-  const { apiKey, model, messages, timeoutMs, res } = input;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  let summary = "";
-  let responseModel = model;
-  let inputTokens = 0;
-  let outputTokens = 0;
-
-  try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        accept: "text/event-stream",
-      },
-      body: JSON.stringify({ model, messages, max_tokens: 8192, stream: true }),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      res.write(`data: ${JSON.stringify({ type: "error", message: `Anthropic API error ${response.status}: ${text.slice(0, 200)}` })}\n\n`);
-      res.write("data: [DONE]\n\n");
-      res.end();
-      return;
-    }
-
-    if (!response.body) {
-      res.write(`data: ${JSON.stringify({ type: "error", message: "Anthropic returned no body" })}\n\n`);
-      res.write("data: [DONE]\n\n");
-      res.end();
-      return;
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith("data:")) continue;
-          const raw = trimmed.slice("data:".length).trim();
-          try {
-            const event = JSON.parse(raw) as {
-              type?: string;
-              message?: { model?: string; usage?: { input_tokens?: number; output_tokens?: number } };
-              delta?: { type?: string; text?: string };
-              usage?: { input_tokens?: number; output_tokens?: number };
-            };
-            if (event.type === "message_start" && event.message) {
-              if (event.message.model) responseModel = event.message.model;
-              if (event.message.usage) {
-                inputTokens = event.message.usage.input_tokens ?? 0;
-              }
-            } else if (event.type === "content_block_delta" && event.delta?.type === "text_delta") {
-              const text = event.delta.text ?? "";
-              if (text) {
-                summary += text;
-                res.write(`data: ${JSON.stringify({ type: "delta", text })}\n\n`);
-              }
-            } else if (event.type === "message_delta" && event.usage) {
-              outputTokens = event.usage.output_tokens ?? 0;
-            }
-          } catch {
-            // ignore unparseable SSE lines
-          }
-        }
-      }
-    } finally {
-      reader.cancel().catch(() => {});
-    }
-  } finally {
-    clearTimeout(timer);
-  }
-
-  res.write(
-    `data: ${JSON.stringify({
-      type: "result",
-      summary,
-      provider: "claude",
-      model: responseModel,
-      usage: { inputTokens, outputTokens },
-    })}\n\n`,
-  );
-  res.write("data: [DONE]\n\n");
-  res.end();
-}
-
-function normalizeMessages(raw: unknown): ChatMessage[] {
-  if (!Array.isArray(raw)) return [];
-  const out: ChatMessage[] = [];
-  for (const item of raw) {
-    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-    const rec = item as Record<string, unknown>;
-    const role = typeof rec.role === "string" ? rec.role.trim() : "";
-    const content = typeof rec.content === "string" ? rec.content : "";
-    if (role && content) out.push({ role, content });
-  }
-  return out;
 }
 
 export function copilotGatewayRoutes() {
@@ -362,25 +295,28 @@ export function copilotGatewayRoutes() {
   });
 
   router.get("/models", (req, res) => {
+    if (!checkRateLimit(req, res)) return;
     const requiredToken = resolveGatewayAuthToken();
     if (requiredToken && !checkAuth(req, res, requiredToken)) return;
 
-    const llm = resolveLlmConfig();
-    if (!llm) {
+    const githubToken = resolveGitHubToken();
+    if (!githubToken) {
       res.json([]);
       return;
     }
-    const models = llm.provider === "claude" ? CLAUDE_MODELS_FALLBACK : OPENAI_MODELS_FALLBACK;
-    res.json(models);
+    res.json(COPILOT_MODELS);
   });
 
   router.post("/chat", async (req, res) => {
+    if (!checkRateLimit(req, res)) return;
     const requiredToken = resolveGatewayAuthToken();
     if (requiredToken && !checkAuth(req, res, requiredToken)) return;
 
-    const llm = resolveLlmConfig();
-    if (!llm) {
-      res.status(503).json({ error: "No LLM provider configured. Set OPENAI_API_KEY or ANTHROPIC_API_KEY." });
+    const githubToken = resolveGitHubToken();
+    if (!githubToken) {
+      res.status(503).json({
+        error: "No GitHub token configured. Set PAPERCLIP_COPILOT_GATEWAY_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN.",
+      });
       return;
     }
 
@@ -391,21 +327,17 @@ export function copilotGatewayRoutes() {
       return;
     }
 
-    const defaultModel = llm.provider === "claude" ? "claude-opus-4-5" : "gpt-4o";
-    const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : defaultModel;
+    const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : "gpt-4o";
     const timeoutSec = typeof body.timeoutSec === "number" ? body.timeoutSec : 120;
     const timeoutMs = timeoutSec * 1000;
+    const apiBase = resolveCopilotApiBase();
 
     try {
-      let result: { summary: string; model: string; inputTokens: number; outputTokens: number };
-      if (llm.provider === "claude") {
-        result = await callClaudeChat({ apiKey: llm.apiKey, model, messages, timeoutMs });
-      } else {
-        result = await callOpenAiChat({ apiKey: llm.apiKey, model, messages, timeoutMs });
-      }
+      const bearerToken = await resolveCopilotBearerToken(githubToken);
+      const result = await callCopilotChat({ bearerToken, apiBase, model, messages, timeoutMs });
       res.json({
         summary: result.summary,
-        provider: llm.provider,
+        provider: "copilot",
         model: result.model,
         usage: { inputTokens: result.inputTokens, outputTokens: result.outputTokens },
       });
@@ -416,13 +348,16 @@ export function copilotGatewayRoutes() {
   });
 
   router.post("/chat/stream", async (req, res) => {
+    if (!checkRateLimit(req, res)) return;
     const requiredToken = resolveGatewayAuthToken();
     if (requiredToken && !checkAuth(req, res, requiredToken)) return;
 
-    const llm = resolveLlmConfig();
-    if (!llm) {
+    const githubToken = resolveGitHubToken();
+    if (!githubToken) {
       res.setHeader("content-type", "text/event-stream");
-      res.write(`data: ${JSON.stringify({ type: "error", message: "No LLM provider configured. Set OPENAI_API_KEY or ANTHROPIC_API_KEY." })}\n\n`);
+      res.write(
+        `data: ${JSON.stringify({ type: "error", message: "No GitHub token configured. Set PAPERCLIP_COPILOT_GATEWAY_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN." })}\n\n`,
+      );
       res.write("data: [DONE]\n\n");
       res.end();
       return;
@@ -438,21 +373,18 @@ export function copilotGatewayRoutes() {
       return;
     }
 
-    const defaultModel = llm.provider === "claude" ? "claude-opus-4-5" : "gpt-4o";
-    const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : defaultModel;
+    const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : "gpt-4o";
     const timeoutSec = typeof body.timeoutSec === "number" ? body.timeoutSec : 120;
     const timeoutMs = timeoutSec * 1000;
+    const apiBase = resolveCopilotApiBase();
 
     res.setHeader("content-type", "text/event-stream");
     res.setHeader("cache-control", "no-cache");
     res.setHeader("connection", "keep-alive");
 
     try {
-      if (llm.provider === "claude") {
-        await streamClaudeChat({ apiKey: llm.apiKey, model, messages, timeoutMs, res });
-      } else {
-        await streamOpenAiChat({ apiKey: llm.apiKey, model, messages, timeoutMs, res });
-      }
+      const bearerToken = await resolveCopilotBearerToken(githubToken);
+      await streamCopilotChat({ bearerToken, apiBase, model, messages, timeoutMs, res });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (!res.headersSent) {
